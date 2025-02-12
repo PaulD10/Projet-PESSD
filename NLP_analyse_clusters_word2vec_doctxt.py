@@ -1,6 +1,13 @@
+# -*- coding: utf-8 -*-
+"""
+INSEE Text Analysis with Word Embeddings, Clustering, and Topic Modeling
+"""
+
 import pandas as pd
 import numpy as np
-from gensim.models import Word2Vec
+from gensim.models import Word2Vec, LdaModel
+from gensim.corpora import Dictionary
+from gensim.models.coherencemodel import CoherenceModel
 import spacy
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -10,25 +17,30 @@ import gc
 from tqdm.auto import tqdm
 import re
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.manifold import TSNE
+import umap
+import pyLDAvis
+import pyLDAvis.gensim_models
 
 class LargeInseeAnalyzer:
-    def __init__(self, batch_size=1000, max_words=50000, min_word_freq=3):
+    def __init__(self, batch_size=1000, max_words=5000000, min_word_freq=3):
         """Initialize analyzer with French-specific settings."""
         print("Initializing analyzer...")
         self.nlp = spacy.load('fr_core_news_md')
         self.batch_size = batch_size
         self.max_words = max_words
         self.min_word_freq = min_word_freq
+        self.processed_texts = None
 
         # Enhanced French stop words
         self.stop_words = set(self.nlp.Defaults.stop_words)
         self.stop_words.update([
             'insee', 'figure', 'encadré', 'être', 'avoir', 'faire',
             'dont', 'cet', 'cette', 'ces', 'celui', 'celle',
-            'ainsi', 'alors', 'donc', 'etc', 'cas','onglet', 'ouvrir'
+            'ainsi', 'alors', 'donc', 'etc', 'cas', 'onglet', 'ouvrir'
         ])
 
     def clean_text(self, text):
@@ -63,7 +75,7 @@ class LargeInseeAnalyzer:
                     if (token.pos_ in ['NOUN', 'VERB', 'ADJ', 'PROPN'] and
                         not token.is_stop and
                         not token.is_punct and
-                        len(token.text) > 2 and  # Increased minimum length
+                        len(token.text) > 2 and
                         token.lemma_ not in self.stop_words):
 
                         # Handle compound words
@@ -84,14 +96,12 @@ class LargeInseeAnalyzer:
     def process_in_batches(self, csv_path):
         """Process CSV file with article-level processing."""
         try:
-            # Read the CSV file
             df = pd.read_csv(csv_path)
             print(f"Loaded CSV file with {len(df)} articles")
 
             all_processed_texts = []
             total_articles = 0
 
-            # Process each article
             for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing articles"):
                 try:
                     processed_tokens = self.process_article(row['full_text_sections'])
@@ -103,12 +113,7 @@ class LargeInseeAnalyzer:
                     continue
 
             print(f"\nSuccessfully processed {total_articles} articles")
-
-            # Debug information
-            if total_articles > 0:
-                print("\nSample of processed tokens from first article:")
-                print(all_processed_texts[0][:20])
-
+            self.processed_texts = all_processed_texts
             return all_processed_texts
 
         except Exception as e:
@@ -152,50 +157,23 @@ class LargeInseeAnalyzer:
         print("\nTraining word embeddings...")
         model = Word2Vec(sentences=filtered_texts,
                         vector_size=200,
-                        window=10,  # Increased context window
+                        window=10,
                         min_count=self.min_word_freq,
                         workers=4,
-                        sg=1)  # Using skip-gram
+                        sg=1)
 
         return model, filtered_freq
 
-def analyze_insee_articles(csv_path, batch_size=1000, max_words=50000, min_word_freq=3):
-    """Main analysis function."""
-    print("\n=== Starting INSEE Article Analysis ===")
-    print(f"Batch size: {batch_size}")
-    print(f"Max words: {max_words}")
-    print(f"Minimum word frequency: {min_word_freq}")
-
-    analyzer = LargeInseeAnalyzer(
-        batch_size=batch_size,
-        max_words=max_words,
-        min_word_freq=min_word_freq
-    )
-
-    processed_texts = analyzer.process_in_batches(csv_path)
-    if not processed_texts:
-        print("No texts were processed successfully")
-        return None, None, None
-
-    model, word_freq = analyzer.create_focused_embeddings(processed_texts)
-    return model, None, word_freq
-
-import numpy as np
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.manifold import TSNE
-import umap
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from tqdm.auto import tqdm
-import pandas as pd
-from collections import defaultdict
-
 class InseeClusterAnalyzer:
-    def __init__(self, model, word_freq, n_clusters=12):
+    def __init__(self, model, word_freq, processed_texts=None, n_clusters=12):
+        """Initialize with word embeddings and optional processed texts."""
         self.model = model
         self.word_freq = word_freq
         self.n_clusters = n_clusters
+        self.processed_texts = processed_texts
+        self.dictionary = None
+        self.corpus = None
+        self.lda_model = None
 
     def prepare_vectors(self, min_freq=10):
         """Prepare word vectors for clustering."""
@@ -238,30 +216,9 @@ class InseeClusterAnalyzer:
         tsne_embedding = tsne.fit_transform(vectors)
 
         return umap_embedding, tsne_embedding
-    def analyze_clusters(self, labels, words, frequencies):
-        """Analyze cluster composition and statistics."""
-        # Créer un DataFrame avec les informations des clusters
-        cluster_data = pd.DataFrame({
-            'word': words,
-            'frequency': frequencies,
-            'cluster': labels
-        })
-
-        # Calculer les statistiques par cluster
-        cluster_stats = []
-        for cluster in sorted(cluster_data['cluster'].unique()):
-            cluster_words = cluster_data[cluster_data['cluster'] == cluster]
-            cluster_stats.append({
-                'Cluster': cluster,
-                'Size': len(cluster_words),
-                'Average Frequency': cluster_words['frequency'].mean(),
-                'Top Words': ', '.join(cluster_words.nlargest(5, 'frequency')['word'].tolist())
-            })
-
-        return pd.DataFrame(cluster_stats)
 
     def evaluate_clusters(self, vectors, min_clusters=2, max_clusters=30):
-        """Évalue différents nombres de clusters avec plusieurs métriques."""
+        """Evaluate different numbers of clusters with multiple metrics."""
         print("\nÉvaluation du nombre optimal de clusters...")
 
         n_clusters_range = range(min_clusters, max_clusters + 1)
@@ -284,7 +241,7 @@ class InseeClusterAnalyzer:
         return metrics, n_clusters_range
 
     def plot_optimization_metrics(self, metrics, n_clusters_range):
-        """Visualise les métriques d'optimisation."""
+        """Visualize cluster optimization metrics."""
         fig = make_subplots(
             rows=2, cols=2,
             subplot_titles=(
@@ -328,13 +285,13 @@ class InseeClusterAnalyzer:
         fig.show()
 
     def find_optimal_clusters(self, vectors, min_clusters=2, max_clusters=30):
-        """Détermine le nombre optimal de clusters."""
+        """Determine optimal number of clusters."""
         metrics, n_clusters_range = self.evaluate_clusters(vectors, min_clusters, max_clusters)
 
-        # Visualisation des métriques
+        # Visualize metrics
         self.plot_optimization_metrics(metrics, n_clusters_range)
 
-        # Normalisation des métriques
+        # Normalize metrics
         norm_silhouette = np.array(metrics['silhouette'])
         norm_calinski = (np.array(metrics['calinski']) - min(metrics['calinski'])) / \
                        (max(metrics['calinski']) - min(metrics['calinski']))
@@ -343,10 +300,10 @@ class InseeClusterAnalyzer:
         norm_inertia = 1 - (np.array(metrics['inertia']) - min(metrics['inertia'])) / \
                       (max(metrics['inertia']) - min(metrics['inertia']))
 
-        # Score composite
+        # Composite score
         composite_score = (norm_silhouette + norm_calinski + norm_davies + norm_inertia) / 4
 
-        # Trouver le meilleur nombre de clusters
+        # Find optimal number of clusters
         optimal_idx = np.argmax(composite_score)
         optimal_n = list(n_clusters_range)[optimal_idx]
 
@@ -385,11 +342,29 @@ class InseeClusterAnalyzer:
 
         return kmeans_labels, dbscan_labels
 
+    def analyze_clusters(self, labels, words, frequencies):
+        """Analyze cluster composition and statistics."""
+        cluster_data = pd.DataFrame({
+            'word': words,
+            'frequency': frequencies,
+            'cluster': labels
+        })
+
+        cluster_stats = []
+        for cluster in sorted(cluster_data['cluster'].unique()):
+            cluster_words = cluster_data[cluster_data['cluster'] == cluster]
+            cluster_stats.append({
+                'Cluster': cluster,
+                'Size': len(cluster_words),
+                'Average Frequency': cluster_words['frequency'].mean(),
+                'Top Words': ', '.join(cluster_words.nlargest(5, 'frequency')['word'].tolist())
+            })
+
+        return pd.DataFrame(cluster_stats)
+
     def visualize_clusters_plotly(self, embedding, labels, words, frequencies,
                                 method_name):
         """Create interactive cluster visualization with Plotly."""
-
-        # Create DataFrame for plotting
         df = pd.DataFrame({
             'x': embedding[:, 0],
             'y': embedding[:, 1],
@@ -398,20 +373,14 @@ class InseeClusterAnalyzer:
             'cluster': labels
         })
 
-        # Calculate frequency percentile for each word
         df['freq_percentile'] = df['frequency'].rank(pct=True)
-
-        # Determine which words to label (top 10% by frequency)
         df['show_label'] = df['freq_percentile'] > 0.9
 
-        # Create the scatter plot
         fig = go.Figure()
 
-        # Add scatter points for each cluster
         for cluster in sorted(df['cluster'].unique()):
             cluster_data = df[df['cluster'] == cluster]
 
-            # Add scatter points
             fig.add_trace(
                 go.Scatter(
                     x=cluster_data['x'],
@@ -431,11 +400,10 @@ class InseeClusterAnalyzer:
                         lambda x: f"Mot: {x['word']}<br>Fréquence: {x['frequency']}<br>Cluster: {x['cluster']}",
                         axis=1
                     ),
-                    hoverinfo='text'
+hoverinfo='text'
                 )
             )
 
-        # Update layout
         fig.update_layout(
             title=dict(
                 text=f'Clusters de Mots ({method_name})',
@@ -450,29 +418,23 @@ class InseeClusterAnalyzer:
             height=800,
         )
 
-        # Update axes
         fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
         fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
 
-        # Show the plot
         fig.show()
 
     def create_cluster_summary_plot(self, cluster_analysis):
         """Create interactive summary visualization of clusters."""
-
-        # Prepare data for visualization
         clusters = cluster_analysis['Cluster'].tolist()
         sizes = cluster_analysis['Size'].tolist()
         avg_freqs = cluster_analysis['Average Frequency'].tolist()
 
-        # Create the figure
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=('Taille des Clusters', 'Fréquence Moyenne par Cluster'),
             specs=[[{"type": "bar"}, {"type": "bar"}]]
         )
 
-        # Add size bar chart
         fig.add_trace(
             go.Bar(
                 x=[f'Cluster {c}' for c in clusters],
@@ -483,7 +445,6 @@ class InseeClusterAnalyzer:
             row=1, col=1
         )
 
-        # Add frequency bar chart
         fig.add_trace(
             go.Bar(
                 x=[f'Cluster {c}' for c in clusters],
@@ -494,7 +455,6 @@ class InseeClusterAnalyzer:
             row=1, col=2
         )
 
-        # Update layout
         fig.update_layout(
             title_text="Analyse des Clusters",
             showlegend=False,
@@ -504,6 +464,203 @@ class InseeClusterAnalyzer:
 
         fig.show()
 
+    def prepare_for_lda(self, processed_texts=None, min_freq=5):
+        """Prepare texts for LDA analysis."""
+        if processed_texts is None and self.processed_texts is None:
+            raise ValueError("No processed texts available for LDA analysis")
+
+        texts_to_use = processed_texts if processed_texts is not None else self.processed_texts
+        print("\nPreparing texts for LDA analysis...")
+
+        # Create dictionary
+        self.dictionary = Dictionary(texts_to_use)
+
+        # Filter out rare and common words
+        self.dictionary.filter_extremes(no_below=min_freq, no_above=0.5)
+
+        # Create corpus
+        self.corpus = [self.dictionary.doc2bow(text) for text in texts_to_use]
+
+        return self.dictionary, self.corpus
+
+    def evaluate_lda_models(self, corpus, dictionary, processed_texts,
+                          min_topics=2, max_topics=30, step=1):
+        """Evaluate LDA models with different numbers of topics."""
+        print("\nEvaluating LDA models...")
+
+        coherence_scores = []
+        perplexity_scores = []
+        n_topics_range = range(min_topics, max_topics + 1, step)
+
+        for n_topics in tqdm(n_topics_range, desc="Evaluating topic numbers"):
+            # Train LDA model
+            lda = LdaModel(
+                corpus=corpus,
+                id2word=dictionary,
+                num_topics=n_topics,
+                random_state=42,
+                passes=10,
+                alpha='auto',
+                eta='auto'
+            )
+
+            # Calculate coherence score
+            coherence_model = CoherenceModel(
+                model=lda,
+                texts=processed_texts,
+                dictionary=dictionary,
+                coherence='c_v'
+            )
+            coherence_scores.append(coherence_model.get_coherence())
+
+            # Calculate perplexity
+            perplexity_scores.append(lda.log_perplexity(corpus))
+
+        return n_topics_range, coherence_scores, perplexity_scores
+
+    def plot_lda_metrics(self, n_topics_range, coherence_scores, perplexity_scores):
+        """Plot LDA evaluation metrics."""
+        fig = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=('Coherence Score (↑)', 'Perplexity Score (↓)')
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=list(n_topics_range),
+                y=coherence_scores,
+                mode='lines+markers',
+                name='Coherence'
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=list(n_topics_range),
+                y=perplexity_scores,
+                mode='lines+markers',
+                name='Perplexity'
+            ),
+            row=1, col=2
+        )
+
+        fig.update_layout(
+            height=400,
+            title_text="Métriques d'évaluation LDA",
+            showlegend=True
+        )
+
+        fig.show()
+
+    def train_lda_model(self, n_topics):
+        """Train the final LDA model."""
+        if self.corpus is None or self.dictionary is None:
+            raise ValueError("Corpus and dictionary must be prepared first using prepare_for_lda()")
+
+        print(f"\nTraining LDA model with {n_topics} topics...")
+
+        self.lda_model = LdaModel(
+            corpus=self.corpus,
+            id2word=self.dictionary,
+            num_topics=n_topics,
+            random_state=42,
+            passes=20,
+            alpha='auto',
+            eta='auto'
+        )
+
+        return self.lda_model
+
+    def visualize_lda_topics(self):
+        """Create interactive visualization of LDA topics."""
+        if self.lda_model is None or self.corpus is None or self.dictionary is None:
+            raise ValueError("LDA model, corpus, and dictionary must be prepared first")
+
+        try:
+            # Prepare visualization
+            vis_data = pyLDAvis.gensim_models.prepare(
+                self.lda_model,
+                self.corpus,
+                self.dictionary,
+                sort_topics=False
+            )
+
+            # Save visualization to HTML
+            pyLDAvis.save_html(vis_data, 'lda_visualization.html')
+            print("\nLDA visualization saved to 'lda_visualization.html'")
+        except Exception as e:
+            print(f"Error creating LDA visualization: {str(e)}")
+
+    def export_lda_topics(self, output_path="lda_topics.txt"):
+        """Export LDA topics to a text file."""
+        if self.lda_model is None:
+            raise ValueError("LDA model must be trained first")
+
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("ANALYSE DES TOPICS LDA\n")
+                f.write("=" * 50 + "\n\n")
+
+                # Write topic information
+                for topic_id in range(self.lda_model.num_topics):
+                    f.write(f"Topic {topic_id + 1}\n")
+                    f.write("-" * 20 + "\n")
+
+                    # Get top words for topic
+                    words = self.lda_model.show_topic(topic_id, topn=20)
+
+                    for word, prob in words:
+                        f.write(f"{word}: {prob:.4f}\n")
+
+                    f.write("\n")
+
+            print(f"LDA topics exported to {output_path}")
+        except Exception as e:
+            print(f"Error exporting LDA topics: {str(e)}")
+
+    def perform_lda_analysis(self, processed_texts=None, min_freq=5,
+                           optimize_topics=True, min_topics=2, max_topics=30):
+        """Perform complete LDA analysis."""
+        try:
+            # Use provided texts or stored texts
+            texts_to_use = processed_texts if processed_texts is not None else self.processed_texts
+            if texts_to_use is None:
+                raise ValueError("No processed texts available for LDA analysis")
+
+            # Prepare data for LDA
+            self.prepare_for_lda(texts_to_use, min_freq)
+
+            if optimize_topics:
+                # Evaluate different numbers of topics
+                n_topics_range, coherence_scores, perplexity_scores = self.evaluate_lda_models(
+                    self.corpus, self.dictionary, texts_to_use,
+                    min_topics, max_topics
+                )
+
+                # Plot evaluation metrics
+                self.plot_lda_metrics(n_topics_range, coherence_scores, perplexity_scores)
+
+                # Find optimal number of topics (based on coherence)
+                optimal_topics = list(n_topics_range)[np.argmax(coherence_scores)]
+                print(f"\nOptimal number of topics based on coherence: {optimal_topics}")
+            else:
+                optimal_topics = self.n_clusters
+
+            # Train final model
+            self.train_lda_model(optimal_topics)
+
+            # Create visualizations
+            self.visualize_lda_topics()
+
+            # Export topics
+            self.export_lda_topics()
+
+            return self.lda_model
+
+        except Exception as e:
+            print(f"Error during LDA analysis: {str(e)}")
+            return None
 
     def perform_analysis(self, min_freq=10, optimize_clusters=True, min_clusters=2, max_clusters=30):
         """Perform complete clustering analysis with optional optimization."""
@@ -538,124 +695,157 @@ class InseeClusterAnalyzer:
 
         print("\nCluster Analysis:")
         print(cluster_analysis.to_string())
-        export_clusters_to_txt(cluster_analysis, kmeans_labels, words, frequencies, "clusters_analysis.txt")
-        # In your perform_analysis method, after clustering:
 
+        # Export cluster analysis
+        export_clusters_to_txt(cluster_analysis, kmeans_labels, words, frequencies, "clusters_analysis.txt")
 
         return cluster_analysis
 
-def analyze_clusters(model, word_freq, n_clusters=12, min_freq=10):
-    """Main function for cluster analysis."""
-    print("\n=== Starting Cluster Analysis ===")
-    analyzer = InseeClusterAnalyzer(model, word_freq, n_clusters)
-    return analyzer.perform_analysis(min_freq)
-
 def export_clusters_to_txt(cluster_analysis, labels, words, frequencies, output_path="clusters.txt"):
-    """
-    Export clusters to a nicely formatted text file.
+    """Export clusters to a nicely formatted text file."""
+    try:
+        # Create a dictionary to store words and frequencies for each cluster
+        clusters = defaultdict(list)
+        for word, freq, label in zip(words, frequencies, labels):
+            clusters[label].append((word, freq))
 
-    Parameters:
-    -----------
-    cluster_analysis : pandas.DataFrame
-        DataFrame containing cluster statistics
-    labels : array-like
-        Cluster labels for each word
-    words : list
-        List of words
-    frequencies : list
-        List of word frequencies
-    output_path : str
-        Path where to save the text file
-    """
-    # Create a dictionary to store words and frequencies for each cluster
-    clusters = defaultdict(list)
-    for word, freq, label in zip(words, frequencies, labels):
-        clusters[label].append((word, freq))
+        # Sort clusters by size
+        cluster_sizes = {k: len(v) for k, v in clusters.items()}
+        sorted_clusters = sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)
 
-    # Sort clusters by size (number of words)
-    cluster_sizes = {k: len(v) for k, v in clusters.items()}
-    sorted_clusters = sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            # Write header
+            f.write("ANALYSE DES CLUSTERS DE MOTS\n")
+            f.write("=" * 50 + "\n\n")
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        # Write header
-        f.write("ANALYSE DES CLUSTERS DE MOTS\n")
-        f.write("=" * 50 + "\n\n")
+            # Write summary statistics
+            f.write("STATISTIQUES GÉNÉRALES\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Nombre total de clusters: {len(clusters)}\n")
+            f.write(f"Nombre total de mots: {sum(cluster_sizes.values())}\n")
+            f.write(f"Moyenne de mots par cluster: {sum(cluster_sizes.values()) / len(clusters):.1f}\n")
+            f.write("\n")
 
-        # Write summary statistics
-        f.write("STATISTIQUES GÉNÉRALES\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"Nombre total de clusters: {len(clusters)}\n")
-        f.write(f"Nombre total de mots: {sum(cluster_sizes.values())}\n")
-        f.write(f"Moyenne de mots par cluster: {sum(cluster_sizes.values()) / len(clusters):.1f}\n")
-        f.write("\n")
+            # Write detailed cluster information
+            f.write("DÉTAIL DES CLUSTERS\n")
+            f.write("-" * 30 + "\n\n")
 
-        # Write detailed cluster information
-        f.write("DÉTAIL DES CLUSTERS\n")
-        f.write("-" * 30 + "\n\n")
+            for cluster_id, words_freq in sorted_clusters:
+                # Get cluster statistics
+                cluster_stats = cluster_analysis[cluster_analysis['Cluster'] == cluster_id].iloc[0]
 
-        for cluster_id, words_freq in sorted_clusters:
-            # Get cluster statistics
-            cluster_stats = cluster_analysis[cluster_analysis['Cluster'] == cluster_id].iloc[0]
+                # Sort words by frequency
+                sorted_words = sorted(words_freq, key=lambda x: x[1], reverse=True)
 
-            # Sort words by frequency
-            sorted_words = sorted(words_freq, key=lambda x: x[1], reverse=True)
+                # Write cluster header
+                f.write(f"Cluster {cluster_id}\n")
+                f.write(f"{'-' * 20}\n")
 
-            # Write cluster header
-            f.write(f"Cluster {cluster_id}\n")
-            f.write(f"{'-' * 20}\n")
+                # Write cluster statistics
+                f.write(f"Taille: {len(sorted_words)} mots\n")
+                f.write(f"Fréquence moyenne: {cluster_stats['Average Frequency']:.1f}\n")
 
-            # Write cluster statistics
-            f.write(f"Taille: {len(sorted_words)} mots\n")
-            f.write(f"Fréquence moyenne: {cluster_stats['Average Frequency']:.1f}\n")
+                # Write words and their frequencies
+                f.write("\nMots les plus fréquents:\n")
+                for word, freq in sorted_words:
+                    f.write(f"{word}: {freq}\n")
 
-            # Write words and their frequencies
-            f.write("\nMots les plus fréquents:\n")
-            for word, freq in sorted_words:
-                f.write(f"{word}: {freq}\n")
+                f.write("\n" + "=" * 50 + "\n\n")
 
-            f.write("\n" + "=" * 50 + "\n\n")
+        print(f"Clusters exported to {output_path}")
+        return {
+            'total_clusters': len(clusters),
+            'total_words': sum(cluster_sizes.values()),
+            'file_path': output_path
+        }
 
-    print(f"Clusters exported to {output_path}")
+    except Exception as e:
+        print(f"Error exporting clusters: {str(e)}")
+        return None
 
-    # Return a summary of the export
-    return {
-        'total_clusters': len(clusters),
-        'total_words': sum(cluster_sizes.values()),
-        'file_path': output_path
-    }
+def analyze_insee_articles(csv_path, batch_size=1000, max_words=50000, min_word_freq=3):
+    """Main analysis function for INSEE articles."""
+    print("\n=== Starting INSEE Article Analysis ===")
 
-# Put this at the end of your file, replacing the existing if __name__ == "__main__": block
+    analyzer = LargeInseeAnalyzer(
+        batch_size=batch_size,
+        max_words=max_words,
+        min_word_freq=min_word_freq
+    )
+
+    processed_texts = analyzer.process_in_batches(csv_path)
+    if not processed_texts:
+        print("No texts were processed successfully")
+        return None, None, None
+
+    model, word_freq = analyzer.create_focused_embeddings(processed_texts)
+    return model, processed_texts, word_freq
+
 if __name__ == "__main__":
     try:
-        # Define the path to your CSV file
+        # Define path to CSV file
+        csv_path = "/home/paul/Desktop/INSEE projet stat/output/insee__premiere_publications_full.csv"  # Update with your actual path
+        print(f"Starting analysis of file: {csv_path}")
 
-        # First step: Process articles and create embeddings
+        # Process articles and create embeddings
         print("\nStep 1: Processing articles and creating embeddings...")
-        ls_periode = ["/home/paul/Desktop/INSEE projet stat/output/insee_publications_full.csv","/home/paul/Desktop/INSEE projet stat/output/data_2010_2014.csv","/home/paul/Desktop/INSEE projet stat/output/data_2015_2019.csv","/home/paul/Desktop/INSEE projet stat/output/data_2020_2024.csv"]
-        for i in ls_periode:
-            model, _, word_freq = analyze_insee_articles(
-                csv_path=i,
-                batch_size=1000,
-                max_words=100000,
-                min_word_freq=2
-            )
+        model, processed_texts, word_freq = analyze_insee_articles(
+            csv_path=csv_path,
+            batch_size=1000,
+            max_words=100000,
+            min_word_freq=2
+        )
 
-            # Check if the first step was successful
-            if model is None or word_freq is None:
-                raise ValueError("Failed to create word embeddings. Check the input data and parameters.")
+        if model is None or processed_texts is None or word_freq is None:
+            raise ValueError("Failed to process articles and create embeddings")
 
-            # Second step: Perform clustering analysis
-            print("\nStep 2: Performing clustering analysis...")
-            cluster_analysis = analyze_clusters(
-                model=model,
-                word_freq=word_freq,
-                n_clusters=15,
-                min_freq=5
-            )
+        # Create analyzer with processed texts
+        analyzer = InseeClusterAnalyzer(
+            model=model,
+            word_freq=word_freq,
+            processed_texts=processed_texts
+        )
+# Perform clustering analysis
+        print("\nPerforming clustering analysis...")
+        cluster_analysis = analyzer.perform_analysis(
+            min_freq=5,
+            optimize_clusters=True,
+            min_clusters=2,
+            max_clusters=30
+        )
 
-            print("\nAnalysis completed successfully!")
+        if cluster_analysis is None:
+            print("Warning: Clustering analysis failed")
+        else:
+            print("\nClustering analysis completed successfully")
 
-        except FileNotFoundError:
-            print(f"Error: Could not find the file at {csv_path}")
-        except Exception as e:
-            print(f"Error during analysis: {str(e)}")
+        # Perform LDA analysis
+        print("\nPerforming LDA analysis...")
+        lda_model = analyzer.perform_lda_analysis(
+            processed_texts=processed_texts,
+            min_freq=5,
+            optimize_topics=True,
+            min_topics=15,
+            max_topics=30
+        )
+
+        if lda_model is None:
+            print("Warning: LDA analysis failed")
+        else:
+            print("\nLDA analysis completed successfully")
+
+        print("\nComplete analysis finished successfully!")
+
+        # Memory cleanup
+        gc.collect()
+
+    except FileNotFoundError:
+        print(f"Error: Could not find the file at {csv_path}")
+        print("Please check the file path and try again.")
+    except ValueError as ve:
+        print(f"Value Error: {str(ve)}")
+        print("Please check your input parameters and try again.")
+    except Exception as e:
+        print(f"Unexpected error during analysis: {str(e)}")
+        print("Please check the error message and your input data.")
+        raise  # Re-raise the exception for debugging
