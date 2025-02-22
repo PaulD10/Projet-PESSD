@@ -1,21 +1,58 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-import time
-from datetime import datetime
+import pandas as pd
+from tqdm import tqdm
 
-def get_insee_articles(url="https://www.insee.fr/fr/statistiques?debut=0&idprec=8283129&collection=6"):
-    """
-    Get URLs of articles from INSEE using Selenium
+# List of categories and their corresponding URLs
+categories_urls = [
+    ("Economie générale", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=28&categorie=2&collection=116"),
+    ("Conjoncture", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=30&categorie=2&collection=116"),
+    ("Comptes nationaux trimestriels", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=32&categorie=2&collection=116"),
+    ("Comptes nationaux annuels", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=33&categorie=2&collection=116"),
+    ("Finances publiques", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=36&categorie=2&collection=116"),
+    ("Commerce extérieur", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=35&categorie=2&collection=116"),
+    ("Evolution et structure de la population", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=1&categorie=2&collection=116"),
+    ("Naissances - Fécondité", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=2&categorie=2&collection=116"),
+    ("Décès - Mortalité - Espérance de vie", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=3&categorie=2&collection=116"),
+    ("Couple - Familles - Ménages", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=4&categorie=2&collection=116"),
+    ("Etrangers - Immigrés", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=5&categorie=2&collection=116"),
+    ("Revenus - Niveau de vie - Pouvoir d'achat - Consommation", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=81&categorie=2&collection=116"),
+    ("Protection sociale - Retraites", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=26&categorie=2&collection=116"),
+    ("Pauvreté - Précarité", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=82&categorie=2&collection=116"),
+    ("Patrimoine", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=83&categorie=2&collection=116"),
+    ("Consommation et équipement des ménages", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=19&categorie=2&collection=116"),
+    ("Société - Vie sociale - Elections", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=10&categorie=2&collection=116"),
+    ("Education - Formation - Compétences", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=15&categorie=2&collection=116"),
+    ("Logement", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=7&categorie=2&collection=116"),
+    ("Egalité femmes-hommes", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=84&categorie=2&collection=116"),
+    ("Santé - Handicap - Dépendance", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=11&categorie=2&collection=116"),
+    ("Sécurité - Justice", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=8&categorie=2&collection=116"),
+    ("Loisirs - Culture", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=9&categorie=2&collection=116"),
+    ("Emploi - Population active", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=22&categorie=2&collection=116"),
+    ("Chômage", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=23&categorie=2&collection=116"),
+    ("Salaires et revenus d'activité", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=24&categorie=2&collection=116"),
+    ("Entreprises", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=38&categorie=2&collection=116"),
+    ("Démographie et création des entreprises", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=38&categorie=2&collection=116"),
+    ("Caractéristiques des entreprises", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=39&categorie=2&collection=116"),
+    ("Mondialisation, compétitivité et innovation", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=43&categorie=2&collection=116"),
+    ("Agriculture", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=45&categorie=2&collection=116"),
+    ("Commerce", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=49+51+52+48&categorie=2&collection=116"),
+    ("Industrie", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=54+57+56+55+58+53&categorie=2&collection=116"),
+    ("Construction", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=59&categorie=2&collection=116"),
+    ("Services", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=61+63+60&categorie=2&collection=116"),
+    ("Transports", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=66&categorie=2&collection=116"),
+    ("Tourisme", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=67&categorie=2&collection=116"),
+    ("Economie sociale et solidaire", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=85&categorie=2&collection=116"),
+    ("Equipements et services à la population", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=69&categorie=2&collection=116"),
+    ("Villes et quartiers", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=71&categorie=2&collection=116"),
+    ("Dynamique des territoires", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=72&categorie=2&collection=116"),
+    ("Mobilités - Déplacements - Frontaliers", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=73&categorie=2&collection=116"),
+    ("Environnement", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=75&categorie=2&collection=116"),
+    ("Développement durable", "https://www.insee.fr/fr/statistiques?taille=100&debut=0&theme=76&categorie=2&collection=116")
+]
 
-    Args:
-        url (str): The URL of the INSEE statistics page with collection filter
-
-    Returns:
-        list: List of article URLs
-    """
+def scrape_links(category, url):
     # Setup Chrome options
     chrome_options = Options()
     chrome_options.add_argument('--headless')  # Run in headless mode
@@ -25,83 +62,43 @@ def get_insee_articles(url="https://www.insee.fr/fr/statistiques?debut=0&idprec=
     # Initialize the driver
     driver = webdriver.Chrome(options=chrome_options)
 
+    data = []
     try:
         # Navigate to the page
         driver.get(url)
 
-        # Wait for the documents table to be present
-        table = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "documents"))
-        )
+        # Find all elements with class 'echo-lien', 'echo-titre', and 'echo-chapo'
+        links = driver.find_elements(By.CLASS_NAME, 'echo-lien')
+        titles = driver.find_elements(By.CLASS_NAME, 'echo-titre')
+        abstracts = driver.find_elements(By.CLASS_NAME, 'echo-chapo')
 
-        # Wait a bit for dynamic content to load
-        time.sleep(2)
-
-        # Find all article links
-        links = table.find_elements(By.TAG_NAME, "a")
-
-        # Extract URLs
-        urls = []
-        for link in links:
+        # Extract data and filter out rows with titles containing "anciens numéros"
+        for link, title, abstract in zip(links, titles, abstracts):
             href = link.get_attribute('href')
-            if href and 'statistiques' in href:
-                urls.append(href)
+            title_text = title.text
+            abstract_text = abstract.text
 
-        return list(dict.fromkeys(urls))  # Remove duplicates while preserving order
-
+            if href and 'anciens numéros' not in title_text.lower():
+                full_url = href
+                data.append((category, full_url, title_text, abstract_text))
     finally:
-        # Clean up
         driver.quit()
 
-def get_all_collection_pages():
-    """
-    Get all article URLs across multiple pages
-    """
-    all_urls = []
-    page = 0
+    return data
 
-    while True:
-        url = f"https://www.insee.fr/fr/statistiques?taille=100&debut={page * 100}&collection=6"
-        print(f"Fetching page {page + 1}...")
+# List to store the data
+data = []
 
-        urls = get_insee_articles(url)
+# Iterate over each category and URL with a progress bar
+for category, url in tqdm(categories_urls, desc="Scraping categories"):
+    data.extend(scrape_links(category, url))
 
-        if not urls or urls[-1] in all_urls:  # No new URLs found
-            break
 
-        all_urls.extend(urls)
-        page += 1
+# Create a DataFrame
+df = pd.DataFrame(data, columns=['Category', 'Link', 'Title', 'Abstract'])
+df = df.sort_values('Category')
+# Display the DataFrame
+print(df)
 
-    return list(dict.fromkeys(all_urls))  # Remove any duplicates
-
-def save_urls_as_python_list(urls, filename=None):
-    """
-    Save URLs as a Python list of strings in a .py file
-
-    Args:
-        urls (list): List of URLs to save
-        filename (str, optional): Name of the file to save to. If None, generates a name
-    """
-    if filename is None:
-        # Generate filename with current date
-        current_date = datetime.now().strftime("%Y%m%d")
-        filename = f"insee_analyse_urls_{current_date}.py"
-
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write("urls = [\n")
-        for url in urls:
-            # Properly format each URL as a string with proper escaping
-            f.write(f"    \"{url}\",\n")
-        f.write("]\n")
-
-    return filename
-
-if __name__ == "__main__":
-    print("Fetching Insee Analyse articles...")
-    urls = get_all_collection_pages()
-
-    # Save URLs to Python file
-    filename = save_urls_as_python_list(urls)
-
-    print(f"\nFound {len(urls)} articles.")
-    print(f"URLs have been saved to: {filename}")
+# Save the DataFrame to a CSV file
+df.to_csv('insee_links.csv', index=False)
